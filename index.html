@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Guardian Tracker</title>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container { max-width: 600px; margin: 0 auto; }
+    h1 { text-align: center; margin-bottom: 24px; color: #38bdf8; }
+    .card {
+      background: #1e293b;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    input, button {
+      width: 100%;
+      padding: 12px;
+      margin: 8px 0;
+      border-radius: 8px;
+      border: none;
+      font-size: 15px;
+    }
+    input { background: #334155; color: white; }
+    button {
+      background: #0ea5e9;
+      color: white;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: #0284c7; }
+    button.danger { background: #ef4444; }
+    button.danger:hover { background: #dc2626; }
+    .hidden { display: none; }
+    .device {
+      background: #334155;
+      padding: 12px;
+      border-radius: 8px;
+      margin-top: 10px;
+    }
+    .stolen { border-left: 4px solid #ef4444; }
+    .status { font-size: 13px; color: #94a3b8; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🛡️ Guardian Tracker</h1>
+
+    <!-- Auth Section -->
+    <div id="authSection" class="card">
+      <h2 id="authTitle">Login</h2>
+      <input type="text" id="name" placeholder="Full Name (for register)" class="hidden" />
+      <input type="email" id="email" placeholder="Email" />
+      <input type="password" id="password" placeholder="Password" />
+      <button onclick="handleAuth()">Login</button>
+      <button onclick="toggleAuth()" style="background:#475569; margin-top:8px;">
+        Switch to Register
+      </button>
+      <p id="authMessage" style="margin-top:10px; color:#f87171;"></p>
+    </div>
+
+    <!-- Dashboard -->
+    <div id="dashboard" class="card hidden">
+      <h2>Welcome, <span id="userName"></span></h2>
+      <button onclick="logout()" class="danger">Logout</button>
+
+      <h3 style="margin-top:20px;">Add Device</h3>
+      <input type="text" id="deviceId" placeholder="Device ID (e.g. phone-001)" />
+      <input type="text" id="deviceName" placeholder="Device Name (e.g. My Phone)" />
+      <button onclick="addDevice()">Register Device</button>
+
+      <h3 style="margin-top:20px;">My Devices</h3>
+      <div id="devicesList"></div>
+    </div>
+  </div>
+
+  <script>
+    const API = 'http://localhost:5000'; // Change this after deployment
+    let token = localStorage.getItem('token');
+    let isLogin = true;
+    let socket = null;
+
+    function toggleAuth() {
+      isLogin = !isLogin;
+      document.getElementById('authTitle').innerText = isLogin ? 'Login' : 'Register';
+      document.getElementById('name').classList.toggle('hidden', isLogin);
+      document.querySelector('#authSection button:nth-of-type(2)').innerText =
+        isLogin ? 'Switch to Register' : 'Switch to Login';
+    }
+
+    async function handleAuth() {
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      const name = document.getElementById('name').value.trim();
+      const msg = document.getElementById('authMessage');
+
+      if (!email || !password || (!isLogin && !name)) {
+        msg.innerText = 'Please fill all fields';
+        return;
+      }
+
+      const endpoint = isLogin ? '/api/login' : '/api/register';
+      const body = isLogin ? { email, password } : { email, password, name };
+
+      try {
+        const res = await fetch(API + endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          msg.innerText = data.message || 'Error';
+          return;
+        }
+
+        token = data.token;
+        localStorage.setItem('token', token);
+        localStorage.setItem('user', JSON.stringify(data.user));
+        showDashboard(data.user);
+      } catch (err) {
+        msg.innerText = 'Network error. Is the server running?';
+      }
+    }
+
+    function showDashboard(user) {
+      document.getElementById('authSection').classList.add('hidden');
+      document.getElementById('dashboard').classList.remove('hidden');
+      document.getElementById('userName').innerText = user.name;
+
+      // Connect socket
+      socket = io(API);
+      socket.emit('join', user.id);
+      socket.on('locationUpdate', (data) => {
+        console.log('Location update:', data);
+        loadDevices();
+      });
+
+      loadDevices();
+    }
+
+    async function loadDevices() {
+      try {
+        const res = await fetch(API + '/api/devices', {
+          headers: { Authorization: 'Bearer ' + token }
+        });
+        const devices = await res.json();
+        const list = document.getElementById('devicesList');
+
+        if (!devices.length) {
+          list.innerHTML = '<p style="color:#94a3b8;">No devices yet</p>';
+          return;
+        }
+
+        list.innerHTML = devices.map(d => `
+          <div class="device ${d.isStolen ? 'stolen' : ''}">
+            <strong>${d.name}</strong> (${d.deviceId})
+            <div class="status">
+              Status: ${d.isStolen ? '🚨 STOLEN' : '✅ Safe'}
+              ${d.lastLocation ? `<br>Last location: ${d.lastLocation.lat.toFixed(4)}, ${d.lastLocation.lng.toFixed(4)}` : ''}
+            </div>
+            <button onclick="toggleStolen('${d.deviceId}', ${!d.isStolen})" style="margin-top:8px; width:auto; padding:6px 12px;">
+              Mark as ${d.isStolen ? 'Recovered' : 'Stolen'}
+            </button>
+            <button onclick="updateLocation('${d.deviceId}')" style="margin-top:8px; width:auto; padding:6px 12px; background:#22c55e;">
+              Send Test Location
+            </button>
+          </div>
+        `).join('');
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function addDevice() {
+      const deviceId = document.getElementById('deviceId').value.trim();
+      const name = document.getElementById('deviceName').value.trim();
+
+      if (!deviceId || !name) return alert('Fill device ID and name');
+
+      const res = await fetch(API + '/api/devices', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + token
+        },
+        body: JSON.stringify({ deviceId, name })
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        document.getElementById('deviceId').value = '';
+        document.getElementById('deviceName').value = '';
+        loadDevices();
+      } else {
+        alert(data.message);
+      }
+    }
+
+    async function toggleStolen(deviceId, isStolen) {
+      await fetch(API + `/api/devices/${deviceId}/stolen`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + token
+        },
+        body: JSON.stringify({ isStolen })
+      });
+      loadDevices();
+    }
+
+    async function updateLocation(deviceId) {
+      // Simulate a location (Lagos example)
+      const lat = 6.5244 + (Math.random() - 0.5) * 0.01;
+      const lng = 3.3792 + (Math.random() - 0.5) * 0.01;
+
+      await fetch(API + `/api/devices/${deviceId}/location`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + token
+        },
+        body: JSON.stringify({ lat, lng, accuracy: 10 })
+      });
+      loadDevices();
+    }
+
+    function logout() {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      token = null;
+      if (socket) socket.disconnect();
+      document.getElementById('dashboard').classList.add('hidden');
+      document.getElementById('authSection').classList.remove('hidden');
+    }
+
+    // Auto login if token exists
+    window.onload = () => {
+      const user = localStorage.getItem('user');
+      if (token && user) {
+        showDashboard(JSON.parse(user));
+      }
+    };
+  </script>
+</body>
+</html>
